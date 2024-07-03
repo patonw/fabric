@@ -1,0 +1,10 @@
+[package]
+name = "fabric-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.8", features = ["env", "derive"] }
+dotenv = { version = "0.15.0", features = ["clap"] }
+inventory = "0.3.15"
+tracing = "0.1.40"
