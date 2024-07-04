@@ -1,49 +1,29 @@
-use fabric_rs::hello;
-use clap::{Parser, Subcommand};
-use dotenv;
+use std::io::IsTerminal;
+use anyhow::Result;
+use fabric_rs::{App, app::ARGS};
 
-#[derive(Parser, Debug)]
-#[clap()]
-struct Arguments {
-    #[clap(short,long, env="FABRIC_MODEL")]
-    model: Option<String>,
+use tracing_subscriber::{
+    prelude::*,
+    filter::EnvFilter,
+};
 
-    #[command(subcommand)]
-    command: Option<Command>,
-}
+fn main() -> Result<()> {
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr);
 
-#[derive(Subcommand, Default, Debug)]
-enum Command {
-    /// List available patterns
-    #[default]
-    ListPatterns,
+    let tracer = tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env());
 
-    /// Show all available models
-    ListModels,
-
-    /// See results in realtime
-    Stream,
-
-    /// Pipe output into another command
-    Pipe,
-
-    /// Initialize fabric
-    Setup,
-
-    /// Update patterns
-    Update,
-}
-
-fn main() {
-    dotenv::dotenv().ok();
-    let args = Arguments::parse();
-
-    match args.command {
-        Some(Command::Stream) => {
-            println!("Results")
-        },
-        _ => {
-            println!("Patterns:")
-        },
+    if std::io::stderr().is_terminal() {
+        tracer
+            .with(fmt_layer)
+            .init();
+    } else {
+        tracer
+            .with(fmt_layer.json())
+            .init();
     }
+
+    let app = App::default();
+    app.run(&ARGS)
 }
