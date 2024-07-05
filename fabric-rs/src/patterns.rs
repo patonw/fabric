@@ -5,8 +5,9 @@ use tracing::{instrument, debug};
 type StringSeq = Box<dyn Iterator<Item=String>>;
 type PathSeq = Box<dyn Iterator<Item=PathBuf>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pattern {
+    pub name: String,
     pub system: String,
 }
 
@@ -37,8 +38,9 @@ impl PatternRegistry for DirectoryPatternRegistry {
 
         debug!(path=path.to_str(), "Reading pattern file");
         let system = std::fs::read_to_string(path)?;
+        let name = name.to_string();
 
-        Ok(Pattern { system })
+        Ok(Pattern { name, system })
     }
 }
 

@@ -6,10 +6,12 @@ use tracing::{instrument, info, debug};
 use shellexpand;
 
 use crate::patterns::*;
-use crate::app::ARGS;
+use crate::provider::*;
+use crate::app::App;
 
 pub struct Dispatcher {
     pub pattern_registries: Vec<Box<dyn PatternRegistry>>,
+    pub providers: Vec<Box<dyn Provider>>,
 }
 
 impl Default for Dispatcher {
@@ -21,7 +23,13 @@ impl Default for Dispatcher {
         let base = Self::empty()
             .with_patterns(Box::new(DirectoryPatternRegistry::new(pattern_dir)));
 
-        let extra = ARGS.extra_patterns.clone().unwrap_or(String::new());
+        let base = if let Some(api_key) = &App::args().claude_api_key {
+            base.with_provider(Box::new(anthropic::AnthropicProvider::new(api_key)))
+        } else {
+            base
+        };
+
+        let extra = App::args().extra_patterns.clone().unwrap_or(String::new());
 
         extra.split(";")
             .filter_map(|s| shellexpand::full(s).ok())
@@ -35,15 +43,27 @@ impl Dispatcher {
     pub fn empty() -> Self {
         Self {
             pattern_registries: Vec::new(),
+            providers: Vec::new(),
         }
     }
 
     pub fn with_patterns(self, more: Box<dyn PatternRegistry>) -> Self {
-        let Self { mut pattern_registries } = self;
+        let Self { mut pattern_registries, providers } = self;
         pattern_registries.push(more);
 
         Self {
-            pattern_registries
+            pattern_registries,
+            providers,
+        }
+    }
+
+    pub fn with_provider(self, more: Box<dyn Provider>) -> Self {
+        let Self { pattern_registries, mut providers } = self;
+        providers.push(more);
+
+        Self {
+            pattern_registries,
+            providers,
         }
     }
 
@@ -73,6 +93,19 @@ impl Dispatcher {
         }
 
         result
+    }
+
+    pub fn list_models(&self) -> Result<Vec<String>> {
+        Ok(self.providers.iter()
+            .flat_map(|p| p.list_models())
+            .collect())
+    }
+
+    pub fn get_client(&self, model: &str) -> Result<Box<dyn Client>> {
+        self.providers.iter().map(|p| p.get_client(&model))
+            .filter_map(|r| r.ok())
+            .next()
+            .ok_or(anyhow!("No providers for model {model}"))
     }
 }
 

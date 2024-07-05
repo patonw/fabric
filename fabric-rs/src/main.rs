@@ -1,13 +1,14 @@
 use std::io::IsTerminal;
 use anyhow::Result;
-use fabric_rs::{App, app::ARGS};
+use fabric_rs::App;
 
 use tracing_subscriber::{
     prelude::*,
     filter::EnvFilter,
 };
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr);
 
@@ -25,5 +26,5 @@ fn main() -> Result<()> {
     }
 
     let app = App::default();
-    app.run(&ARGS)
+    app.run(App::args()).await
 }
