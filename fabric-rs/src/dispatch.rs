@@ -73,7 +73,7 @@ impl Dispatcher {
         info!(answer = 42, question = "life, the universe, and everything");
 
         let all = self.pattern_registries.iter()
-            .map(|r| r.iter_patterns())
+            .map(|r| r.list_patterns())
             .map(|r| r.inspect_err(
                     |e| debug!("Failed to get patterns from registry: {e}")))
             .filter_map(|r| r.ok())
@@ -97,7 +97,9 @@ impl Dispatcher {
 
     pub fn list_models(&self) -> Result<Vec<String>> {
         Ok(self.providers.iter()
-            .flat_map(|p| p.list_models())
+            .map(|p| p.list_models())
+            .filter_map(|p| p.ok())
+            .flatten()
             .collect())
     }
 
@@ -109,3 +111,189 @@ impl Dispatcher {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use cool_asserts::assert_matches;
+    use super::*;
+    use anyhow::bail;
+    use crate::patterns::Pattern;
+    use async_trait::async_trait;
+
+    struct DummyClient {
+    }
+
+    #[async_trait]
+    impl Client for DummyClient {
+        async fn send_message(&self, _pattern: &Pattern, _text: &str) -> Result<String> {
+            todo!()
+        }
+
+        async fn stream_message(&self, _pattern: &Pattern, _text: &str) -> Result<StreamResponse> {
+            todo!()
+        }
+    }
+
+    struct DummyProvider {
+        models: Vec<String>,
+    }
+
+    impl Provider for DummyProvider {
+        fn list_models(&self) -> Result<Vec<String>> {
+            Ok(self.models.clone())
+        }
+
+        fn get_client(&self, name: &str) -> Result<Box<dyn Client>> {
+            let model = name.to_string();
+            if self.models.contains(&model) {
+                Ok(Box::new(DummyClient {}))
+            }
+            else {
+                bail!("Not here")
+            }
+        }
+    }
+    struct DummyPatterns {
+        patterns: Vec<String>,
+    }
+
+    impl PatternRegistry for DummyPatterns {
+        fn list_patterns(&self) -> Result<Vec<String>> {
+            Ok(self.patterns.clone())
+        }
+
+        fn get_pattern(&self, name: &str) -> Result<Pattern> {
+            let name = name.to_string();
+            if self.patterns.contains(&name) {
+                Ok(Pattern {
+                    name,
+                    system: String::new(),
+                })
+            }
+            else {
+                bail!("Not here")
+            }
+        }
+    }
+
+    #[test]
+    fn empty_has_no_patterns() -> Result<()> {
+        let dispatcher = Dispatcher::empty();
+        let patterns = dispatcher.list_patterns()?;
+        assert_eq!(patterns, vec![] as Vec<String>);
+        Ok(())
+    }
+
+    #[test]
+    fn patterns_from_all_registries() -> Result<()> {
+        let disp = Dispatcher::empty()
+            .with_patterns(Box::new(DummyPatterns {
+                patterns: vec!["one".to_string(), "two".to_string()]
+            }))
+            .with_patterns(Box::new(DummyPatterns {
+                patterns: vec![]
+            }))
+            .with_patterns(Box::new(DummyPatterns {
+                patterns: vec!["three".to_string()]
+            }));
+
+        let mut patterns = disp.list_patterns()?;
+        let mut expected = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        patterns.sort();
+        expected.sort();
+        assert_eq!(patterns, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_missing_pattern_fails() -> Result<()> {
+        let disp = Dispatcher::empty()
+            .with_patterns(Box::new(DummyPatterns {
+                patterns: vec!["one".to_string()]
+            }))
+            .with_patterns(Box::new(DummyPatterns {
+                patterns: vec!["two".to_string()]
+            }));
+
+        let result = disp.get_pattern("zero");
+        assert_matches!(result, Err(_));
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_existing_pattern_passes() -> Result<()> {
+        let disp = Dispatcher::empty()
+            .with_patterns(Box::new(DummyPatterns {
+                patterns: vec!["one".to_string()]
+            }))
+            .with_patterns(Box::new(DummyPatterns {
+                patterns: vec!["two".to_string()]
+            }));
+
+        let result = disp.get_pattern("two");
+        assert_matches!(result, Ok(_));
+
+        Ok(())
+    }
+
+    #[test]
+    fn empty_has_no_models() -> Result<()> {
+        let dispatcher = Dispatcher::empty();
+        let models = dispatcher.list_models()?;
+        assert_eq!(models, vec![] as Vec<String>);
+        Ok(())
+    }
+
+    #[test]
+    fn list_all_models() -> Result<()> {
+        let disp = Dispatcher::empty()
+            .with_provider(Box::new(DummyProvider {
+                models: vec!["one".to_string()]
+            }))
+            .with_provider(Box::new(DummyProvider {
+                models: vec!["three".to_string()]
+            }));
+
+        let mut models = disp.list_models()?;
+        let mut expected = vec!["one".to_string(), "three".to_string()];
+        models.sort();
+        expected.sort();
+        assert_eq!(models, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_missing_model_fails() -> Result<()> {
+        let disp = Dispatcher::empty()
+            .with_provider(Box::new(DummyProvider {
+                models: vec!["one".to_string()]
+            }))
+            .with_provider(Box::new(DummyProvider {
+                models: vec!["three".to_string()]
+            }));
+
+        let result = disp.get_client("zero");
+        assert!(matches!(result, Err(_)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_existing_model_passes() -> Result<()> {
+        let disp = Dispatcher::empty()
+            .with_provider(Box::new(DummyProvider {
+                models: vec!["one".to_string()]
+            }))
+            .with_provider(Box::new(DummyProvider {
+                models: vec!["three".to_string()]
+            }));
+
+        let result = disp.get_client("three");
+        assert!(matches!(result, Ok(_)));
+
+        Ok(())
+    }
+
+}

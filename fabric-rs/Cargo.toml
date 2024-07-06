@@ -9,6 +9,7 @@ async-trait = "0.1.80"
 clap = { version = "4.5.8", features = ["env", "derive"] }
 directories = "5.0.1"
 dotenvy = { version = "0.15.7", features = ["clap"] }
+eventsource-stream = "0.2.3"
 futures = "0.3.30"
 reqwest = { version = "0.12.5", features = ["json"] }
 reqwest-eventsource = "0.6.0"
@@ -18,3 +19,7 @@ shellexpand = "3.1.0"
 tokio = { version = "1.38.0", features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json", "registry"] }
+
+[dev-dependencies]
+assert_matches = "1.5.0"
+cool_asserts = "2.0.3"

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 use tracing::{debug, info, info_span, warn};
 use reqwest;
@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use tokio::task;
 use futures::stream::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
+use eventsource_stream::Event as MessageEvent;
 
-use super::{Client, Provider, StreamResponse};
+use super::{Client, Provider, ChatResponse, StreamResponse};
 use crate::patterns::Pattern;
 use crate::app::App;
 
@@ -34,8 +35,8 @@ impl AnthropicProvider {
 }
 
 impl Provider for AnthropicProvider {
-    fn list_models(&self) -> Vec<String> {
-        Vec::from(MODELS.map(|s| s.to_string()))
+    fn list_models(&self) -> Result<Vec<String>> {
+        Ok(Vec::from(MODELS.map(|s| s.to_string())))
     }
 
     fn get_client(&self, model: &str) -> Result<Box<dyn Client>> {
@@ -70,11 +71,30 @@ impl AnthropicClient {
                 ],
             }))
     }
+
+    async fn start_event_stream(&self, req: reqwest::RequestBuilder) -> Result<(EventSource, Value)> {
+        use Event::*;
+        let mut es = EventSource::new(req)?;
+
+        while let Some(event) = es.next().await {
+            match event? {
+                Open => info!("Connection opened"),
+                Message(MessageEvent {event, data, ..}) if event == "message_start" => {
+                    let mut envelope: Value = serde_json::from_str(&data)?;
+                    let meta = envelope["message"].take();
+                    return Ok((es, meta));
+                },
+                Message(_) => bail!("Message content before start"),
+            }
+        }
+
+        bail!("Stream closed before start")
+    }
 }
 
 #[async_trait]
 impl Client for AnthropicClient {
-    async fn send_message(&self, pattern: &Pattern, text: &str) -> Result<String> {
+    async fn send_message(&self, pattern: &Pattern, text: &str) -> Result<ChatResponse> {
         let span = info_span!("send_message", pattern=pattern.name);
         let _span = span.enter();
 
@@ -91,20 +111,11 @@ impl Client for AnthropicClient {
             return Err(anyhow!("Request failed: {}", reason))
         }
 
-        let body = resp.json::<Value>().await?;
-        let content = body["content"]
-            .as_array()
-            .ok_or(anyhow!("Response content missing"))?;
-
-        let result = content.iter()
-            .filter(|c| if c["type"] == "text" { true } else {
-                warn!("Unexpected content block: {:?}", c);
-                false
-            })
-            .filter_map(|c| c["text"].as_str())
-            .fold(String::new(), |mut s, t| { s.push_str(t); s});
-
-        Ok(result)
+        let mut envelope = resp.json::<Value>().await?;
+        let content = envelope["content"].take();
+        let body = process_content(content)?;
+        let meta = envelope;
+        Ok(ChatResponse { meta, body })
     }
 
     async fn stream_message(&self, pattern: &Pattern, text: &str) -> Result<StreamResponse> {
@@ -113,65 +124,166 @@ impl Client for AnthropicClient {
 
         info!(pattern=&pattern.system, text=text, "Starting stream");
 
-        let req = self.build_request(pattern, text, true);
-        let mut es = EventSource::new(req)?;
-
-        let value = json!({});
         let (tx, rx) = mpsc::channel::<Result<String>>(8);
+        let req = self.build_request(pattern, text, true);
+        let (es, meta) = self.start_event_stream(req).await?;
 
         task::spawn(async move {
             let span = info_span!("sse_consumer");
             let _span = span.enter();
 
-            while let Some(event) = es.next().await {
-                match event {
-                    Ok(Event::Open) => info!("Connection open"),
-                    Ok(Event::Message(message)) => {
-                        match message.event.as_str() {
-                            "message_start" => {
-                                debug!(data=message.data, "message_start");
-                                let msg = serde_json::from_str::<Value>(&message.data)
-                                    .context("SSE content start")
-                                    .map(|data| {
-                                        data["message"]["content"].as_array()
-                                            .map(|t| t.to_vec())
-                                            .unwrap_or(Vec::new())
-                                    });
-                                match msg {
-                                    Ok(content) => for block in content {
-                                        tx.send(Ok(block["text"].to_string())).await.unwrap()
-                                    },
-                                    Err(e) => tx.send(Err(e)).await.unwrap(),
-                                }
-                            },
-                            "content_block_delta" => {
-                                let msg = serde_json::from_str::<Value>(&message.data)
-                                    .context("SSE decode data")
-                                    .map(|data| {
-                                        data["delta"]["text"].as_str()
-                                            .map(|t| t.to_string())
-                                            .unwrap_or(String::new())
-                                    });
-
-                                tx.send(msg).await.unwrap()
-                            },
-                            "content_block_stop" => tx.send(Ok("\n\n".to_string())).await.unwrap(),
-                            "message_delta" => debug!(data=message.data, "message_delta"),
-                            "message_stop" => es.close(),
-                            "content_block_start" | "ping" => {},
-                            _ => warn!("Unhandled event type {:?}", message),
-                        }
-                    },
-                    Err(err) => {
-                        warn!("Error: {}", err);
-                        es.close();
-                    }
-                }
+            match consume_event_stream(es, tx).await {
+                Ok(_) => info!("Finished streaming"),
+                Err(e) => warn!("Stream consumer finished with errors: {:?}", e),
             }
-
-            info!("Finished streaming")
         });
 
-        Ok(StreamResponse {value, rx})
+        Ok(StreamResponse { meta, rx })
+    }
+}
+
+async fn consume_event_stream(mut es: EventSource, tx: mpsc::Sender<Result<String>>) -> Result<()> {
+    use Event::*;
+    while let Some(event) = es.next().await {
+        match event {
+            Ok(Open) => warn!("Connection reopened in-flight"),
+            Ok(Message(MessageEvent {event, ..})) if event == "message_stop" => es.close(),
+            Ok(Message(message)) => {
+                match process_event(message) {
+                    Ok(data) => {
+                        for d in data {
+                            tx.send(Ok(d)).await?;
+                        }
+                    },
+                    Err(ex) => {
+                        tx.send(Err(ex)).await?;
+                        es.close();
+                    },
+                }
+            },
+            Err(err) => {
+                warn!("Error: {}", err);
+                es.close();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn process_content(content: Value) -> Result<String> {
+    let blocks = content
+        .as_array()
+        .ok_or(anyhow!("Response content missing"))?;
+
+    let result = blocks.iter()
+        .filter(|c| if c["type"] == "text" { true } else {
+            warn!("Unexpected content block: {:?}", c);
+            false
+        })
+        .filter_map(|c| c["text"].as_str())
+        .fold(String::new(), |mut s, t| { s.push_str(t); s});
+
+    Ok(result)
+}
+
+fn process_event(message: MessageEvent) -> Result<Vec<String>> {
+    match message.event.as_str() {
+        "message_start" => {
+            debug!(data=message.data, "message_start");
+            let msg = serde_json::from_str::<Value>(&message.data)
+                .map(|data| {
+                    data["message"]["content"].as_array()
+                        .map(|t| t.to_vec())
+                        .unwrap_or(Vec::new())
+                })?;
+
+            let content = msg.iter()
+                .filter_map(|block| block["text"].as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+
+            Ok(content)
+        },
+        "content_block_delta" => {
+            let msg = serde_json::from_str::<Value>(&message.data)
+                .map(|data| {
+                    data["delta"]["text"].as_str()
+                        .map(|t| t.to_string())
+                        .unwrap_or(String::new())
+                })?;
+
+            Ok(vec![msg])
+        },
+        "content_block_stop" => Ok(vec!["\n\n".to_string()]),
+        "message_delta" => {
+            debug!(data=message.data, "message_delta");
+            Ok(vec![])
+        },
+        "content_block_start" | "ping" => Ok(vec![]),
+        _ => {
+            warn!("Unhandled event type {:?}", message);
+            Ok(vec![])
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cool_asserts::assert_matches;
+    use super::*;
+
+    fn make_event(name: &str, data: &str) -> MessageEvent {
+        MessageEvent {
+            event: name.to_string(),
+            data: data.to_string(),
+            id: "".to_string(),
+            retry: None,
+        }
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn test_build_request() {
+        todo!()
+    }
+
+    #[test]
+    fn empty_content_fails() {
+        let result = process_content(json!({}));
+        assert_matches!(result, Err(_));
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn valid_content_returns_data() {
+        todo!()
+    }
+
+    #[test]
+    fn unknown_event_ignored() {
+        let result = process_event(make_event("unknown", ""));
+        let expected: Vec<String> = Vec::new();
+
+        assert_matches!(result, Ok(arr) if arr == expected);
+    }
+
+    #[test]
+    fn malformed_delta_event_fails() {
+        let result = process_event(make_event("content_block_delta", "not json"));
+
+        assert_matches!(result, Err(_));
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn empty_message_start_event_pass() {
+        todo!()
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn valid_delta_event_produces_data() {
+        todo!()
     }
 }

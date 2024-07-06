@@ -2,8 +2,7 @@ use std::path::PathBuf;
 use anyhow::{Result};
 use tracing::{instrument, debug};
 
-type StringSeq = Box<dyn Iterator<Item=String>>;
-type PathSeq = Box<dyn Iterator<Item=PathBuf>>;
+pub type PathSeq = Box<dyn Iterator<Item=PathBuf>>;
 
 #[derive(Debug, Clone)]
 pub struct Pattern {
@@ -12,7 +11,7 @@ pub struct Pattern {
 }
 
 pub trait PatternRegistry {
-    fn iter_patterns(&self) -> Result<StringSeq>;
+    fn list_patterns(&self) -> Result<Vec<String>>;
     fn get_pattern(&self, name: &str) -> Result<Pattern>;
 }
 
@@ -22,13 +21,13 @@ pub struct DirectoryPatternRegistry {
 
 impl PatternRegistry for DirectoryPatternRegistry {
     #[instrument(skip(self))]
-    fn iter_patterns(&self) -> Result<StringSeq> {
+    fn list_patterns(&self) -> Result<Vec<String>> {
         let result = self.iter_paths()?
             .filter_map(|p| p.file_name()
                         .and_then(|s| s.to_str())
                         .map(|s| s.to_string()));
 
-        Ok(Box::new(result))
+        Ok(result.collect())
     }
 
     #[instrument(skip(self))]

@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::sync::OnceLock;
 
+use tracing::info;
+
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
@@ -143,7 +145,8 @@ impl App {
                 let text = self.get_user_text(args)?;
 
                 let result = client.send_message(&pattern, &text).await?;
-                println!("{}", &result);
+                info!("Message metadata {:?}", result.meta);
+                println!("{}", &result.body);
             },
             Some(Command::Stream { pattern }) => {
                 let client = self.get_model_client(args)?;
@@ -151,6 +154,8 @@ impl App {
                 let text = self.get_user_text(args)?;
 
                 let result = client.stream_message(&pattern, &text).await?;
+                info!("Message metadata {:?}", result.meta);
+
                 let mut rx = result.rx;
 
                 while let Some(Ok(msg)) = rx.recv().await {
