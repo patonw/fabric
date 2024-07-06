@@ -4,6 +4,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::patterns::Pattern;
+use crate::session::ChatSession;
 
 pub mod anthropic;
 
@@ -24,6 +25,6 @@ pub struct StreamResponse {
 
 #[async_trait]
 pub trait Client {
-    async fn send_message(&self, pattern: &Pattern, text: &str) -> Result<ChatResponse>;
-    async fn stream_message(&self, pattern: &Pattern, text: &str) -> Result<StreamResponse>;
+    async fn send_message(&self, pattern: &Pattern, session: &ChatSession) -> Result<ChatResponse>;
+    async fn stream_message(&self, pattern: &Pattern, session: &ChatSession) -> Result<StreamResponse>;
 }

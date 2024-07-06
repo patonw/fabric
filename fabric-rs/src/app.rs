@@ -1,7 +1,5 @@
-use std::io::Write;
+use std::io::stdout;
 use std::sync::OnceLock;
-
-use tracing::info;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
@@ -10,6 +8,7 @@ use directories::BaseDirs;
 
 use crate::dispatch::*;
 use crate::provider::Client;
+use super::session::SessionManager;
 
 // In general, use `App::args()` to fetch args.
 // Set this directly if you really want to override initialization.
@@ -35,6 +34,9 @@ pub struct Arguments {
     #[clap(short, long, global=true)]
     pub text: Option<String>,
 
+    #[clap(short = 'S', long, global=true, num_args=0..=1, default_missing_value="default")]
+    pub session: Option<String>,
+
     /// Semi-colon list of paths containing more patterns
     #[clap(long, global=true, env="EXTRA_PATTERNS", hide_env_values=true)]
     pub extra_patterns: Option<String>,
@@ -51,6 +53,12 @@ pub enum Command {
 
     /// Show all available models
     ListModels,
+
+    ListSessions,
+
+    DumpSession {
+        name: String,
+    },
 
     /// See results in realtime
     Stream {
@@ -127,6 +135,8 @@ impl App {
 
     pub async fn run(&self, args: &Arguments) -> Result<()> {
         let dispatcher = &self.dispatcher;
+        let manager = SessionManager::default();
+        let session = manager.get_session(&args.session)?;
 
         match &args.command {
             Some(Command::ListPatterns) => {
@@ -139,30 +149,36 @@ impl App {
                     println!("{}", name)
                 }
             },
+            Some(Command::ListSessions) => {
+                for name in manager.list_sessions()? {
+                    println!("{}", name)
+                }
+            },
+            Some(Command::DumpSession { name }) => {
+                use serde::Serialize;
+                use std::io::BufWriter;
+                use serde_yml::ser::Serializer;
+
+                let session = manager.load_session(name)?;
+
+                let mut buf = BufWriter::new(stdout());
+                let mut ser = Serializer::new(&mut buf);
+                session.messages().serialize(&mut ser)?;
+                //dbg!(&session);
+            },
             Some(Command::Pipe { pattern }) => {
                 let client = self.get_model_client(args)?;
                 let pattern = dispatcher.get_pattern(&pattern)?;
                 let text = self.get_user_text(args)?;
-
-                let result = client.send_message(&pattern, &text).await?;
-                info!("Message metadata {:?}", result.meta);
-                println!("{}", &result.body);
+                let mut session = session.with_client(client);
+                session.send_message(&pattern, &text, &mut stdout()).await?;
             },
             Some(Command::Stream { pattern }) => {
                 let client = self.get_model_client(args)?;
                 let pattern = dispatcher.get_pattern(&pattern)?;
                 let text = self.get_user_text(args)?;
-
-                let result = client.stream_message(&pattern, &text).await?;
-                info!("Message metadata {:?}", result.meta);
-
-                let mut rx = result.rx;
-
-                while let Some(Ok(msg)) = rx.recv().await {
-                    print!("{}", msg);
-                    std::io::stdout().flush().ok();
-                }
-
+                let mut session = session.with_client(client);
+                session.stream_message(&pattern, &text, &mut stdout()).await?;
             },
             _ => {
                 todo!("Not implemented")

@@ -114,21 +114,23 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use cool_asserts::assert_matches;
-    use super::*;
     use anyhow::bail;
-    use crate::patterns::Pattern;
     use async_trait::async_trait;
+
+    use super::*;
+    use crate::patterns::Pattern;
+    use crate::session::ChatSession;
 
     struct DummyClient {
     }
 
     #[async_trait]
     impl Client for DummyClient {
-        async fn send_message(&self, _pattern: &Pattern, _text: &str) -> Result<String> {
+        async fn send_message(&self, _pattern: &Pattern, _text: &ChatSession) -> Result<ChatResponse> {
             todo!()
         }
 
-        async fn stream_message(&self, _pattern: &Pattern, _text: &str) -> Result<StreamResponse> {
+        async fn stream_message(&self, _pattern: &Pattern, _text: &ChatSession) -> Result<StreamResponse> {
             todo!()
         }
     }

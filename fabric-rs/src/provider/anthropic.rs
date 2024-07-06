@@ -12,6 +12,7 @@ use eventsource_stream::Event as MessageEvent;
 use super::{Client, Provider, ChatResponse, StreamResponse};
 use crate::patterns::Pattern;
 use crate::app::App;
+use crate::session::ChatSession;
 
 pub const FOO: u64 = 1;
 pub const MODELS: [&str; 5] = [
@@ -43,6 +44,7 @@ impl Provider for AnthropicProvider {
         Ok(Box::new(AnthropicClient {
             api_key: self.api_key.clone(),
             model: model.to_string(),
+            session: None,
         }))
     }
 }
@@ -50,11 +52,23 @@ impl Provider for AnthropicProvider {
 pub struct AnthropicClient {
     pub api_key: String,
     pub model: String,
+    pub session: Option<ChatSession>,
 }
 
 impl AnthropicClient {
-    fn build_request(&self, pattern: &Pattern, text: &str, stream: bool) -> reqwest::RequestBuilder {
+    fn build_request(&self, pattern: &Pattern, session: &ChatSession, stream: bool) -> reqwest::RequestBuilder {
+        use crate::session::ChatEntry::*;
         let args = App::args();
+        let messages: Vec<Value> = session.messages().iter()
+            .filter_map(|m| match m {
+                Query { content, .. } => Some(json!({"role": "user", "content": content})),
+                Reply { content, .. } => Some(json!({"role": "assistant", "content": content})),
+                _ => None,
+            })
+            .collect();
+
+        //debug!("Building request with messages {:?}", &messages);
+
         reqwest::Client::new()
             //.post("https://httpbin.org/post")
             .post("https://api.anthropic.com/v1/messages")
@@ -66,9 +80,7 @@ impl AnthropicClient {
                 "max_tokens": args.max_tokens,
                 "temperature": args.temperature,
                 "system": &pattern.system,
-                "messages": [
-                    { "role": "user", "content": text },
-                ],
+                "messages": &messages,
             }))
     }
 
@@ -84,7 +96,9 @@ impl AnthropicClient {
                     let meta = envelope["message"].take();
                     return Ok((es, meta));
                 },
-                Message(_) => bail!("Message content before start"),
+                Message(body) => {
+                    bail!("Message content before start: {:?}", &body)
+                },
             }
         }
 
@@ -94,12 +108,12 @@ impl AnthropicClient {
 
 #[async_trait]
 impl Client for AnthropicClient {
-    async fn send_message(&self, pattern: &Pattern, text: &str) -> Result<ChatResponse> {
+    async fn send_message(&self, pattern: &Pattern, session: &ChatSession) -> Result<ChatResponse> {
         let span = info_span!("send_message", pattern=pattern.name);
         let _span = span.enter();
 
-        info!(pattern=&pattern.system, text=text, "Sending message");
-        let req = self.build_request(pattern, text, false);
+        info!(pattern=&pattern.system, "Sending message");
+        let req = self.build_request(pattern, session, false);
         let resp = req.send().await?;
 
         let status = resp.status();
@@ -118,14 +132,14 @@ impl Client for AnthropicClient {
         Ok(ChatResponse { meta, body })
     }
 
-    async fn stream_message(&self, pattern: &Pattern, text: &str) -> Result<StreamResponse> {
+    async fn stream_message(&self, pattern: &Pattern, session: &ChatSession) -> Result<StreamResponse> {
         let span = info_span!("stream_message", pattern=pattern.name);
         let _span = span.enter();
 
-        info!(pattern=&pattern.system, text=text, "Starting stream");
+        info!(pattern=&pattern.system, "Starting stream");
 
         let (tx, rx) = mpsc::channel::<Result<String>>(8);
-        let req = self.build_request(pattern, text, true);
+        let req = self.build_request(pattern, session, true);
         let (es, meta) = self.start_event_stream(req).await?;
 
         task::spawn(async move {
@@ -215,7 +229,7 @@ fn process_event(message: MessageEvent) -> Result<Vec<String>> {
 
             Ok(vec![msg])
         },
-        "content_block_stop" => Ok(vec!["\n\n".to_string()]),
+        "content_block_stop" => Ok(vec!["\n".to_string()]),
         "message_delta" => {
             debug!(data=message.data, "message_delta");
             Ok(vec![])
